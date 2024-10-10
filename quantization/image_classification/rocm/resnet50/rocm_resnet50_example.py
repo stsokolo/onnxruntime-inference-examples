@@ -10,6 +10,7 @@ import onnxruntime
 from torchvision import models
 import torch
 from onnxruntime.quantization import CalibrationDataReader
+from onnxconverter_common import float16
 
 def parse_input_args():
     parser = argparse.ArgumentParser()
@@ -347,14 +348,14 @@ if __name__ == '__main__':
 
     flags = parse_input_args()
 
-    resnet50 = models.resnet50(weights=models.ResNet50_Weights.DEFAULT,
+    resnet50_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT,
                                progress=True).eval()
 
     image_height = 224
     image_width = 224
-    x = torch.randn(flags.batch_size, 3, image_height, image_width, requires_grad=True)
+    x = torch.randn(flags.batch, 3, image_height, image_width, requires_grad=True)
 
-    torch.onnx.export(resnet50,                                     # model being run
+    torch.onnx.export(resnet50_model,                               # model being run
                       x,                                            # model input (or a tuple for multiple inputs)
                       f"resnet50_fp32.onnx",                        # where to save the model (can be a file or file-like object)
                       export_params=True,                           # store the trained parameter weights inside the model file
@@ -374,7 +375,12 @@ if __name__ == '__main__':
 
     execution_provider = ["ROCMExecutionProvider"]
 
-    # Add fp16 quantization here
+    # Conveert to fp16 model
+    if flags.fp16:
+        resnet_model_fp32 = onnx.load(f"resnet50_fp32.onnx")
+        resnet_model_fp16 = float16.convert_float_to_float16(resnet_model_fp32)
+        onnx.save(resnet_model_fp16, f"resnet50_fp16.onnx")
+        model_path = "./resnet50_fp16.onnx"
 
     # Convert static batch to dynamic batch
     [new_model_path, input_name] = convert_model_batch_to_dynamic(model_path)
