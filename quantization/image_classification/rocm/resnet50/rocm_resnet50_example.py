@@ -6,6 +6,7 @@ import logging
 from PIL import Image
 import onnx
 import argparse
+import time
 import onnxruntime
 from torchvision import models
 import torch
@@ -24,11 +25,11 @@ def parse_input_args():
     )
 
     parser.add_argument(
-        "--fp32",
+        "--QPS",
         action="store_true",
         required=False,
         default=True,
-        help='Perform no quantization',
+        help='Output Data as Query-Per-Second metric instead of latency',
     )
 
     parser.add_argument(
@@ -48,6 +49,14 @@ def parse_input_args():
                         default=1000,
                         help='Size of images for calibration',
                         type=int)
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        required=False,
+        default=False,
+        help='Show verbose output',
+    )
 
     return parser.parse_args()
 
@@ -168,8 +177,6 @@ class ImageNetDataReader(CalibrationDataReader):
         '''
         def preprocess_images(input, channels=3, height=224, width=224):
             image = input.resize((width, height), Image.Resampling.LANCZOS)
-            if image.mode in ["CMYK", "RGBA"]:
-                image = image.convert("RGB")
             input_data = np.asarray(image).astype(np.float32)
             if len(input_data.shape) != 2:
                 input_data = input_data.transpose([2, 0, 1])
@@ -275,10 +282,17 @@ class ImageClassificationEvaluator:
     def get_result(self):
         return self.prediction_result_list
 
-    def predict(self):
+    def predict(self, latency, verbose=False):
         sess_options = onnxruntime.SessionOptions()
-        sess_options.log_severity_level = 0
-        sess_options.log_verbosity_level = 0
+
+        if verbose:
+            sess_options.log_severity_level = 0
+            sess_options.log_verbosity_level = 0
+        else:
+            sess_options.log_severity_level = 2
+            sess_options.log_verbosity_level = 2
+
+
         sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
         session = onnxruntime.InferenceSession(self.model_path, sess_options=sess_options, providers=self.providers)
 
@@ -287,26 +301,32 @@ class ImageClassificationEvaluator:
             inputs = self.data_reader.get_next()
             if not inputs:
                 break
+
+            start = time.time()
             output = session.run(None, inputs)
+            latency.append(time.time() - start)
             inference_outputs_list.append(output)
         self.prediction_result_list = inference_outputs_list
 
     def top_k_accuracy(self, truth, prediction, k=1):
         '''From https://github.com/chainer/chainer/issues/606
         '''
+
         y = np.argsort(prediction)[:, -k:]
         return np.any(y.T == truth.argmax(axis=1), axis=0).mean()
 
-    def evaluate(self, prediction_results):
+    def evaluate(self, prediction_results, verbose=False):
         batch_size = len(prediction_results[0][0])
         total_val_images = len(prediction_results) * batch_size
         y_prediction = np.empty((total_val_images, 1000), dtype=np.float32)
         i = 0
         for res in prediction_results:
-            y_prediction[i:i + res[0].shape[0], :] = res[0]
+            y_prediction[i:i + batch_size, :] = res[0]
             i = i + batch_size
-        print("top 1: ", self.top_k_accuracy(self.synset_id, y_prediction, k=1))
-        print("top 5: ", self.top_k_accuracy(self.synset_id, y_prediction, k=5))
+
+        if verbose:
+            print("top 1: ", self.top_k_accuracy(self.synset_id, y_prediction, k=1))
+            print("top 5: ", self.top_k_accuracy(self.synset_id, y_prediction, k=5))
 
 
 def convert_model_batch_to_dynamic(model_path):
@@ -403,7 +423,16 @@ if __name__ == '__main__':
     print("Prepping Evalulator")
     evaluator = ImageClassificationEvaluator(new_model_path, synset_id, data_reader, providers=execution_provider)
     print("Performing Predictions")
-    evaluator.predict()
+    latency = []
+    evaluator.predict(latency, flags.verbose)
     print("Read out answer")
     result = evaluator.get_result()
-    evaluator.evaluate(result)
+    evaluator.evaluate(result, flags.verbose)
+
+    if flags.QPS:
+        print("resnet50, Rate = {} QPS".format(
+            format((((flags.batch)) / (sum(latency[1:]) / len(latency[1:]))),
+                   '.2f')))
+    else:
+        print("resnet50, Average execution time = {} ms".format(
+            format(sum(latency[1:]) * 1000 / len(latency[1:]), '.2f')))
