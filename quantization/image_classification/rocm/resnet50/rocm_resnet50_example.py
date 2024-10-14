@@ -64,6 +64,7 @@ class ImageNetDataReader(CalibrationDataReader):
                  image_folder,
                  width=224,
                  height=224,
+                 fp16=False,
                  start_index=0,
                  end_index=0,
                  stride=1,
@@ -89,6 +90,7 @@ class ImageNetDataReader(CalibrationDataReader):
         self.datasize = 0
         self.width = width
         self.height = height
+        self.fp16 = fp16
         self.start_index = start_index
         self.end_index = len(os.listdir(self.image_folder)) if end_index == 0 else end_index
         self.stride = stride if stride >= 1 else 1
@@ -176,7 +178,7 @@ class ImageNetDataReader(CalibrationDataReader):
         '''
         def preprocess_images(input, channels=3, height=224, width=224):
             image = input.resize((width, height), Image.Resampling.LANCZOS)
-            input_data = np.asarray(image).astype(np.float32)
+            input_data = np.asarray(image).astype(np.float32) if not self.fp16 else np.asarray(image).astype(np.float16)
             if len(input_data.shape) != 2:
                 input_data = input_data.transpose([2, 0, 1])
             else:
@@ -374,9 +376,13 @@ if __name__ == '__main__':
     image_width = 224
     x = torch.randn(flags.batch, 3, image_height, image_width, requires_grad=True)
 
+    if flags.fp16:
+        resnet50_model = resnet50_model.half()
+        x = x.half()
+
     torch.onnx.export(resnet50_model,                               # model being run
                       x,                                            # model input (or a tuple for multiple inputs)
-                      f"resnet50_fp32.onnx",                        # where to save the model (can be a file or file-like object)
+                      f"resnet50.onnx",                             # where to save the model (can be a file or file-like object)
                       export_params=True,                           # store the trained parameter weights inside the model file
                       opset_version=14,                             # the ONNX version to export the model to
                       do_constant_folding=True,                     # whether to execute constant folding for optimization
@@ -386,7 +392,7 @@ if __name__ == '__main__':
 
 
     # Dataset settings
-    model_path = "./resnet50_fp32.onnx"
+    model_path = "./resnet50.onnx"
     ilsvrc2012_dataset_path = flags.image_dir
     batch_size = flags.batch
     calibration_dataset_size = 0
@@ -407,7 +413,8 @@ if __name__ == '__main__':
                                      stride=prediction_dataset_size,
                                      batch_size=batch_size,
                                      model_path=new_model_path,
-                                     input_name=input_name)
+                                     input_name=input_name,
+                                     fp16 = flags.fp16)
     print("Completed Data Reader")
     synset_id = data_reader.get_synset_id(ilsvrc2012_dataset_path, calibration_dataset_size,
                                           prediction_dataset_size)  # Generate synset id
