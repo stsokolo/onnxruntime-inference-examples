@@ -11,7 +11,6 @@ import onnxruntime
 from torchvision import models
 import torch
 from onnxruntime.quantization import CalibrationDataReader
-from onnxconverter_common import float16
 
 def parse_input_args():
     parser = argparse.ArgumentParser()
@@ -394,13 +393,6 @@ if __name__ == '__main__':
     calibration_dataset_size = 0
 
     execution_provider = ["ROCMExecutionProvider"]
-
-    # Conveert to fp16 model
-    if flags.fp16:
-        resnet_model_fp32 = onnx.load(f"resnet50_fp32.onnx")
-        resnet_model_fp16 = float16.convert_float_to_float16(resnet_model_fp32)
-        onnx.save(resnet_model_fp16, f"resnet50_fp16.onnx")
-        model_path = "./resnet50_fp16.onnx"
 
     # Convert static batch to dynamic batch
     [new_model_path, input_name] = convert_model_batch_to_dynamic(model_path)
