@@ -8,9 +8,9 @@ import onnx
 import argparse
 import time
 import onnxruntime
+from onnxruntime.quantization import CalibrationDataReader
 from torchvision import models
 import torch
-from onnxruntime.quantization import CalibrationDataReader
 
 def parse_input_args():
     parser = argparse.ArgumentParser()
@@ -21,14 +21,6 @@ def parse_input_args():
         required=False,
         default=False,
         help='Perform fp16 quantizaton in addition to int8',
-    )
-
-    parser.add_argument(
-        "--QPS",
-        action="store_true",
-        required=False,
-        default=True,
-        help='Output Data as Query-Per-Second metric instead of latency',
     )
 
     parser.add_argument(
@@ -43,11 +35,21 @@ def parse_input_args():
                         help='Batch size of images per inference',
                         type=int)
 
+
     parser.add_argument("--cal_size",
                         required=False,
                         default=1000,
                         help='Size of images for calibration',
                         type=int)
+
+    parser.add_argument(
+        "--QPS",
+        action="store_true",
+        required=False,
+        default=False,
+        help=
+        'Show inference result in Queries-Per-Second QPS instead of inference duration (milliseconds)',
+    )
 
     parser.add_argument(
         "--verbose",
@@ -174,7 +176,7 @@ class ImageNetDataReader(CalibrationDataReader):
         parameter size_limit: number of images to load. Default is 0 which means all images are picked.
         return: list of matrices characterizing multiple images
         '''
-        def preprocess_images(input, channels=3, height=224, width=224):
+        def preprocess_images(input, channels=3, height=299, width=299):
             image = input.resize((width, height), Image.Resampling.LANCZOS)
             input_data = np.asarray(image).astype(np.float32)
             if len(input_data.shape) != 2:
@@ -287,10 +289,6 @@ class ImageClassificationEvaluator:
         if verbose:
             sess_options.log_severity_level = 0
             sess_options.log_verbosity_level = 0
-        else:
-            sess_options.log_severity_level = 2
-            sess_options.log_verbosity_level = 2
-
 
         sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_DISABLE_ALL
         session = onnxruntime.InferenceSession(self.model_path, sess_options=sess_options, providers=self.providers)
@@ -314,7 +312,7 @@ class ImageClassificationEvaluator:
         y = np.argsort(prediction)[:, -k:]
         return np.any(y.T == truth.argmax(axis=1), axis=0).mean()
 
-    def evaluate(self, prediction_results, verbose=False):
+    def evaluate(self, prediction_results):
         batch_size = len(prediction_results[0][0])
         total_val_images = len(prediction_results) * batch_size
         y_prediction = np.empty((total_val_images, 1000), dtype=np.float32)
@@ -322,10 +320,8 @@ class ImageClassificationEvaluator:
         for res in prediction_results:
             y_prediction[i:i + batch_size, :] = res[0]
             i = i + batch_size
-
-        if verbose:
-            print("top 1: ", self.top_k_accuracy(self.synset_id, y_prediction, k=1))
-            print("top 5: ", self.top_k_accuracy(self.synset_id, y_prediction, k=5))
+        print("top 1: ", self.top_k_accuracy(self.synset_id, y_prediction, k=1))
+        print("top 5: ", self.top_k_accuracy(self.synset_id, y_prediction, k=5))
 
 
 def convert_model_batch_to_dynamic(model_path):
@@ -367,29 +363,35 @@ if __name__ == '__main__':
 
     flags = parse_input_args()
 
-    resnet50_model = models.resnet50(weights=models.ResNet50_Weights.DEFAULT,
-                               progress=True).eval()
+    inception_v3 = models.inception_v3(weights=models.Inception_V3_Weights.DEFAULT,
+                                   progress=True).eval()
 
-    image_height = 224
-    image_width = 224
-    x = torch.randn(flags.batch, 3, image_height, image_width, requires_grad=True)
-
-    torch.onnx.export(resnet50_model,                               # model being run
-                      x,                                            # model input (or a tuple for multiple inputs)
-                      f"resnet50_fp32.onnx",                        # where to save the model (can be a file or file-like object)
-                      export_params=True,                           # store the trained parameter weights inside the model file
-                      opset_version=14,                             # the ONNX version to export the model to
-                      do_constant_folding=True,                     # whether to execute constant folding for optimization
-                      input_names = ['input'],                      # the model's input names
-                      output_names = ['output'],                    # the model's output names
-                      verbose=flags.verbose)
+    # Export the model to ONNX
+    image_height = 299
+    image_width = 299
+    x = torch.randn(flags.batch,
+                    3,
+                    image_height,
+                    image_width,
+                    requires_grad=True)
+    inception_v3(x)
+    torch.onnx.export(
+        inception_v3,                       # model being run
+        x,                                  # model input (or a tuple for multiple inputs)
+        "inception_v3_fp32.onnx",           # where to save the model (can be a file or file-like object)
+        export_params=True,                 # store the trained parameter weights inside the model file
+        opset_version=14,                   # the ONNX version to export the model to
+        do_constant_folding=True,           # whether to execute constant folding for optimization
+        input_names=['input'],              # the model's input names
+        output_names=['output'],            # the model's output names
+        verbose=flags.verbose)
 
 
     # Dataset settings
-    model_path = "./resnet50_fp32.onnx"
+    model_path = "./inception_v3_fp32.onnx"
     ilsvrc2012_dataset_path = flags.image_dir
     batch_size = flags.batch
-    calibration_dataset_size = 0
+    calibration_dataset_size = 0  # Size of dataset for calibration
 
     execution_provider = ["ROCMExecutionProvider"]
 
@@ -418,12 +420,12 @@ if __name__ == '__main__':
     evaluator.predict(latency, flags.verbose)
     print("Read out answer")
     result = evaluator.get_result()
-    evaluator.evaluate(result, flags.verbose)
+    evaluator.evaluate(result)
 
     if flags.QPS:
-        print("resnet50, Rate = {} QPS".format(
+        print("inception_v3, Rate = {} QPS".format(
             format((((flags.batch)) / (sum(latency[1:]) / len(latency[1:]))),
                    '.2f')))
     else:
-        print("resnet50, Average execution time = {} ms".format(
+        print("inception_v3, Average execution time = {} ms".format(
             format(sum(latency[1:]) * 1000 / len(latency[1:]), '.2f')))
