@@ -115,10 +115,7 @@ class ImageNetDataReader(CalibrationDataReader):
 
         self.enum_data_dicts = None
         if self.start_index < self.end_index:
-            if self.batch_size == 1:
-                data = self.load_serial()
-            else:
-                data = self.load_batches()
+            data = self.load_data()
 
             self.start_index += self.stride
             self.enum_data_dicts = iter(data)
@@ -127,46 +124,37 @@ class ImageNetDataReader(CalibrationDataReader):
         else:
             return None
 
-    def load_serial(self):
-        width = self.width
-        height = self.width
-        nchw_data_list, filename_list, image_size_list = self.preprocess_imagenet(self.image_folder, height, width,
-                                                                                  self.start_index, self.stride)
-        input_name = self.input_name
+    def load_data(self):  
+        width = self.width  
+        height = self.height  
+        input_name = self.input_name  
 
-        data = []
-        for i in range(len(nchw_data_list)):
-            nhwc_data = nchw_data_list[i]
-            file_name = filename_list[i]
-            data.append({input_name: nhwc_data})
+        # Determine if we're loading as serial or batch based on `self.batch_size`  
+        is_serial = self.batch_size == 1  
+        chunk_size = 128 if is_serial else self.batch_size  # Use chunk size of 128 for serial loading  
+        stride = self.stride  # This should be defined earlier in your class  
+
+        data = []  
+        for index in range(0, stride, chunk_size):  
+            start_index = self.start_index + index  
+            # Preprocess data and get the list  
+            nchw_data_list, _, _ = self.preprocess_imagenet(  
+                self.image_folder, height, width, start_index, chunk_size)  
+
+            if len(nchw_data_list) == 0:  
+                break  # Exit the loop if no data is returned  
+
+            if is_serial:  
+                # Extend the data list with the data chunks for serial loading  
+                for nhwc_data in nchw_data_list:
+                    data.append({input_name: nhwc_data})
+            else:  
+                # Concatenate and add to batches for batch loading  
+                batch_data = np.concatenate([nhwc_data for nhwc_data in nchw_data_list], axis=0)  
+                data.append({input_name: batch_data})  
+
         return data
 
-    def load_batches(self):
-        width = self.width
-        height = self.height
-        batch_size = self.batch_size
-        stride = self.stride
-        input_name = self.input_name
-
-        batches = []
-        for index in range(0, stride, batch_size):
-            start_index = self.start_index + index
-            nchw_data_list, filename_list, image_size_list = self.preprocess_imagenet(
-                self.image_folder, height, width, start_index, batch_size)
-
-            if nchw_data_list.size == 0:
-                break
-
-            nchw_data_batch = []
-            for i in range(len(nchw_data_list)):
-                nhwc_data = np.squeeze(nchw_data_list[i], 0)
-                nchw_data_batch.append(nhwc_data)
-            batch_data = np.concatenate(np.expand_dims(nchw_data_batch, axis=0), axis=0)
-            data = {input_name: batch_data}
-
-            batches.append(data)
-
-        return batches
 
     def preprocess_imagenet(self, images_folder, height, width, start_index=0, size_limit=0):
         '''
